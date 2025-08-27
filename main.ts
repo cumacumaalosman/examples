@@ -1,41 +1,30 @@
-// main.ts  (Deno Deploy)
-addEventListener('fetch', (event) => {
-  event.respondWith(handle(event.request))
-})
-
+// main.ts
 const TARGET_HOST = 'https://ecsc-expat.sy:8443'
 
-async function handle(request: Request): Promise<Response> {
+Deno.serve(async (request: Request): Promise<Response> => {
   const origUrl = new URL(request.url)
   const targetUrl = new URL(TARGET_HOST)
   targetUrl.pathname = origUrl.pathname
   targetUrl.search = origUrl.search
 
-  // استنساخ headers الأصلي مع حذف رؤوس ممنوعة مثل Host
+  // استنساخ headers الأصلي مع تعديل بسيط
   const headers = new Headers(request.headers)
-  headers.delete('host')
 
-  // رؤوس مفيدة فقط
+  headers.set('Host', targetUrl.hostname)
   headers.set('Origin', `https://${targetUrl.hostname}`)
   headers.set('Referer', `https://${targetUrl.hostname}${origUrl.pathname}`)
   headers.set('Sec-Fetch-Site', 'same-site')
   headers.set('Sec-Fetch-Mode', 'cors')
   headers.set('Sec-Fetch-Dest', 'empty')
+  headers.set('Alt-Used', targetUrl.hostname)
 
-  console.log('Request Headers:', Object.fromEntries(headers.entries()))
-
-  // قراءة body (نص أو ثنائي)
-  let requestBody: BodyInit | null = null
+  // قراءة body
+  let requestBody: string | undefined = undefined
   if (request.method !== 'GET' && request.method !== 'HEAD') {
-    try {
-      requestBody = await request.clone().text()
-    } catch {
-      requestBody = await request.clone().arrayBuffer()
-    }
-    console.log('Request Body:', typeof requestBody === 'string' ? requestBody : '[binary]')
+    requestBody = await request.clone().text()
   }
 
-  // التعامل مع OPTIONS (preflight)
+  // التعامل مع OPTIONS
   if (request.method === 'OPTIONS') {
     const origin = request.headers.get('Origin') || '*'
     return new Response(null, {
@@ -50,10 +39,10 @@ async function handle(request: Request): Promise<Response> {
     })
   }
 
-  // بناء الطلب للأوريجن
+  // طلب للأوريجن
   const proxiedRequest = new Request(targetUrl.toString(), {
     method: request.method,
-    headers: headers,
+    headers,
     body: requestBody,
     redirect: 'manual'
   })
@@ -65,35 +54,17 @@ async function handle(request: Request): Promise<Response> {
     return new Response('Bad gateway: ' + String(err), { status: 502 })
   }
 
-  console.log('Response Headers:', Object.fromEntries(response.headers.entries()))
+  const respBody = await response.clone().text()
 
-  // قراءة body بأمان
-  let respBody: string | ArrayBuffer
-  try {
-    respBody = await response.clone().text()
-  } catch {
-    respBody = await response.clone().arrayBuffer()
-  }
-  console.log('Response Body:', typeof respBody === 'string' ? (respBody as string).slice(0, 2000) : '[binary]')
-
-  // جمع Set-Cookie الأصلية
+  // تعديل الكوكيز
   const originalSetCookies: string[] = []
-  // محاولة API حديثة إذ وجدت
-  // @ts-ignore
-  if (typeof (response.headers as any).getSetCookie === 'function') {
-    try {
-      // @ts-ignore
-      const arr = (response.headers as any).getSetCookie()
-      if (Array.isArray(arr)) originalSetCookies.push(...arr)
-    } catch {}
-  }
   for (const [k, v] of response.headers.entries()) {
     if (k.toLowerCase() === 'set-cookie') originalSetCookies.push(v)
   }
 
-  function sanitizeSetCookie(sc: string) {
+  function sanitizeSetCookie(sc: string): string {
     const parts = sc.split(';').map(p => p.trim())
-    const nameValue = parts.shift() || ''
+    const nameValue = parts.shift()
     let expires: string | null = null
     let maxAge: string | null = null
 
@@ -121,13 +92,10 @@ async function handle(request: Request): Promise<Response> {
 
   if (origUrl.pathname === '/secure/auth/login' && originalSetCookies.length > 0) {
     for (const sc of originalSetCookies) {
-      const sanitized = sanitizeSetCookie(sc)
-      newHeaders.append('Set-Cookie', sanitized)
-      console.log('Rewritten Set-Cookie:', sanitized)
+      newHeaders.append('Set-Cookie', sanitizeSetCookie(sc))
     }
   }
 
-  // إعداد CORS للسماح بالـ credentials
   const requestOrigin = request.headers.get('Origin')
   if (requestOrigin) {
     newHeaders.set('Access-Control-Allow-Origin', requestOrigin)
@@ -137,13 +105,14 @@ async function handle(request: Request): Promise<Response> {
     newHeaders.set('Access-Control-Allow-Origin', '*')
     newHeaders.set('Access-Control-Allow-Credentials', 'true')
   }
+
   newHeaders.set('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS')
   newHeaders.set('Access-Control-Allow-Headers', '*')
   newHeaders.set('Access-Control-Expose-Headers', '*')
 
-  return new Response(respBody as BodyInit, {
+  return new Response(respBody, {
     status: response.status,
     statusText: response.statusText,
     headers: newHeaders
   })
-}
+})
